@@ -1,0 +1,22 @@
+{
+    "authzs": [
+        {
+            "resource": "/abc/[0-9]+/xyz",
+            "operations": ["GET", "PUT"],
+            "allowed_to": {
+                "user_groups": ["POC-GRP", "Green_Group"],
+                "web_app_client_ids": ["11512cenrga5le8239ambvnva1"],
+                "system_client_ids": ["11512cenrga5le8239ambvnva1-Shivaji", "Green"]
+            }
+        },
+        {
+            "resource": "/pqr",
+            "operations": ["*"],
+            "allowed_to": {
+                "user_groups": ["Yellow_Group", "Magento_Group"],
+                "web_app_client_ids": ["*"],
+                "system_client_ids": ["*"]
+            }
+        }
+    ]
+}
