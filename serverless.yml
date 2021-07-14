@@ -1,56 +1,46 @@
 service: apigw-opa-authz
 frameworkVersion: '2'
+configValidationMode: warn
 
 provider:
   name: aws
   runtime: go1.x
   lambdaHashingVersion: 20201221
-
+  timeout: 10 
+  logRetentionInDays: 1
   stage: dev
   region: ap-southeast-2
 
-  # iamRoleStatements:
-  #   - Effect: "Allow"
-  #     Action:
-  #       - "s3:ListBucket"
-  #     Resource: { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "ServerlessDeploymentBucket" } ] ]  }
-  #   - Effect: "Allow"
-  #     Action:
-  #       - "s3:PutObject"
-  #     Resource:
-  #       Fn::Join:
-  #         - ""
-  #         - - "arn:aws:s3:::"
-  #           - "Ref" : "ServerlessDeploymentBucket"
-  #           - "/*"
+  apiGateway:
+    minimumCompressionSize: 1024
 
-# you can define service wide environment variables here
-#  environment:
-#    variable1: value1
+  httpApi:
+    cors: true
+    payload: "2.0"
+    authorizers:
+      customAuthorizer:
+        type: request
+        functionName: authorizerFunc
+        payloadVersion: '2.0'
+        enableSimpleResponses: true
 
 package:
   patterns:
     - '!./**'
     - ./bin/**
 
+
 functions:
-  authz:
+  authorizerFunc:
     handler: bin/authz
-    events:
-      - httpApi:
-          path: /authz
-          method: get
   service1:
     handler: bin/service1
     events:
       - httpApi:
-          path: /service1
+          path: /service1/9/some
           method: get
           authorizer:
-            type: request
-            name: authz
-            resultTtlInSeconds: 0
-            identitySource: method.request.header.Authorization
+            name: customAuthorizer
   service2:
     handler: bin/service2
     events:
@@ -58,7 +48,4 @@ functions:
           path: /service2
           method: get
           authorizer:
-            type: request
-            name: authz
-            resultTtlInSeconds: 0
-            identitySource: method.request.header.Authorization
+            name: customAuthorizer

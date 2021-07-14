@@ -1,7 +1,7 @@
 {
     "authzs": [
         {
-            "resource": "/abc/[0-9]+/xyz",
+            "resource": "/service1/[0-9]+/some",
             "operations": ["GET", "PUT"],
             "allowed_to": {
                 "user_groups": ["POC-GRP", "Green_Group"],

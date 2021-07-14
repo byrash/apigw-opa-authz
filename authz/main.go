@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"strings"
+	_ "embed"
 
 	"log"
 	"time"
@@ -60,9 +60,15 @@ func compileOpaPolicy() {
 	}
 }
 
-func checkOpaPolicy(roleName string, resourcePath string, operation string) (result bool) {
-	defer track(time.Now(), "checkOpaPolicy()")
+type OpaInput struct {
+	Token     string
+	Operation string
+	Resource  string
+}
 
+func checkOpaPolicy(input OpaInput) (result bool) {
+	defer track(time.Now(), "checkOpaPolicy()")
+	log.Printf("Validating Input [%+v]", input)
 	reg := rego.New(
 		rego.Query("allow_api_call = data.apigw.allow"),
 		rego.Store(store),
@@ -72,13 +78,6 @@ func checkOpaPolicy(roleName string, resourcePath string, operation string) (res
 	if err != nil {
 		panic(err)
 	}
-	// TODO: Create input from request
-	var input interface{}
-	// dec := json.NewDecoder(os.Stdin)
-	// dec.UseNumber()
-	// if err := dec.Decode(&input); err != nil {
-	// 	panic(err)
-	// }
 
 	// Execute the prepared query.
 	rs, err := query.Eval(ctx, rego.EvalInput(input))
@@ -90,68 +89,20 @@ func checkOpaPolicy(roleName string, resourcePath string, operation string) (res
 	return result
 }
 
-func Handler(event events.APIGatewayCustomAuthorizerRequestTypeRequest) (events.APIGatewayCustomAuthorizerResponse, error) {
-	defer track(time.Now(), "Handler()")
-	log.Println("handle event")
-
-	/**
-	check Authorization header first - just using 'allow' and 'deny' value to simulate for now
-	JWT validation can replace this to check signing/exp, and then auth caching can be enabled in apigw
-	*/
-	var headerCheckOk = false
-	switch token := strings.ToLower(event.Headers["Authorization"]); token {
-	case "allow":
-		log.Println("Auth header forcing allow, on to OPA check..")
-		headerCheckOk = true
-	case "deny":
-		log.Println("Auth header forcing deny")
-		return generateIAMPolicy("user", "Deny", event.MethodArn), nil
-	default:
-		log.Println("Auth header invalid: ", token)
-		return generateIAMPolicy("user", "Deny", event.MethodArn), nil
-	}
-
-	/**
-	check request against OPA policy - force the role to either 'gold' or 'silver'
-	gold = can access /gold and /silver
-	silver = can access /silver but not /gold
-	..any other role denied
-	role would be taken from JWT claims once signing, expiry etc is verified
-	*/
-	roleName := event.QueryStringParameters["role"] // just using QS to test
-	resourcePath := event.Path
-	log.Println("roleName: ", roleName)
-	log.Println("resourcePath: ", resourcePath)
-	if headerCheckOk && checkOpaPolicy(roleName, resourcePath, event.HTTPMethod) {
-		log.Println("OPA policy check ok - request allowed")
-		return generateIAMPolicy("user", "Allow", event.MethodArn), nil
-	} else {
-		log.Println("failed OPA policy check")
-		return generateIAMPolicy("user", "Deny", event.MethodArn), nil
-	}
-
+type HttpAPIV2Response struct {
+	IsAuthorized bool `json:"isAuthorized"`
 }
 
-/**
-Generate IAM policy document
-*/
-func generateIAMPolicy(principalId string, effect string, resource string) events.APIGatewayCustomAuthorizerResponse {
-	defer track(time.Now(), "generateIAMPolicy()")
-	authResponse := events.APIGatewayCustomAuthorizerResponse{PrincipalID: principalId}
+var sampleToken = "eyJraWQiOiJTeFB0NVdnVWtPXC9lYlNVTklxNDM0T2pzRXJTeENIWlFaVVVheDN6R2FEdz0iLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJiZjFkZjg2Yi1jMTRkLTQ4NGYtYWNhMS0wZmY1YjM2ZTNhMTIiLCJjb2duaXRvOmdyb3VwcyI6WyJQT0MtR1JQIl0sImlzcyI6Imh0dHBzOlwvXC9jb2duaXRvLWlkcC5hcC1zb3V0aGVhc3QtMi5hbWF6b25hd3MuY29tXC9hcC1zb3V0aGVhc3QtMl9EQmxURUpRRmciLCJ2ZXJzaW9uIjoyLCJjbGllbnRfaWQiOiIxMTUxMmNlbnJnYTVsZTgyMzlhbWJ2bnZhMSIsIm9yaWdpbl9qdGkiOiJhZDZhZGZkMy0zN2NlLTQxOWUtYWE4OS05MzUwMDNmYTFlNDEiLCJ0b2tlbl91c2UiOiJhY2Nlc3MiLCJzY29wZSI6Im9wZW5pZCBQT0NSU1wvUE9DUlMtU0NPUEUiLCJhdXRoX3RpbWUiOjE2MjQ4MzQwNzEsImV4cCI6MTYyNDgzNzY3MSwiaWF0IjoxNjI0ODM0MDcxLCJqdGkiOiI3OGQzMzUyYS1jY2FhLTQzZTctYjExZS02ODViMTU3MDlmZmYiLCJ1c2VybmFtZSI6InNoaXZhamkifQ.hCzVYILXTNUXZm0ohHbEfGqSCLY_JWWIvfJdOWMdA2eLgbk-g_YOltJF_DaP2CWQQOXGbkRz53zb1PZbHE5fB0smbuAVZVSBbGY9SLtuNgYkTmrbP8C-tdVFJkg0xuAL6QLpZpmSonQPMVzfwewyAYhzY1Hwu1Gr-G-eu16nV9fyNh2WhhLACyw1a53_pHZLp04j4Foo91A6kSUR4VOiSNWz6jdYFUAIijZdNY6O9JCivn8S3oGdrH7O-f6ksNCrucxyek9TKcgtWXvsiXReewwkPX2GgCb3YLGEQfkdAh4XhRqKDc3DVn-O7s3YsrXyXQ07CgBDenxvkrz-shH8mg"
 
-	if effect != "" && resource != "" {
-		authResponse.PolicyDocument = events.APIGatewayCustomAuthorizerPolicy{
-			Version: "2012-10-17",
-			Statement: []events.IAMPolicyStatement{
-				{
-					Action:   []string{"execute-api:Invoke"},
-					Effect:   effect,
-					Resource: []string{resource},
-				},
-			},
-		}
+func Handler(event events.APIGatewayV2HTTPRequest) (HttpAPIV2Response, error) {
+	defer track(time.Now(), "Handler()")
+	if checkOpaPolicy(OpaInput{Token: sampleToken, Operation: event.RequestContext.HTTP.Method, Resource: event.RequestContext.HTTP.Path}) {
+		log.Println("OPA policy check ok - request allowed")
+		return HttpAPIV2Response{IsAuthorized: true}, nil
+	} else {
+		log.Println("failed OPA policy check")
+		return HttpAPIV2Response{IsAuthorized: false}, nil
 	}
 
-	authResponse.Context = map[string]interface{}{}
-	return authResponse
 }
