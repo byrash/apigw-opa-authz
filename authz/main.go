@@ -68,9 +68,8 @@ type OpaInput struct {
 
 func checkOpaPolicy(input OpaInput) (result bool) {
 	defer track(time.Now(), "checkOpaPolicy()")
-	log.Printf("Validating Input [%+v]", input)
 	reg := rego.New(
-		rego.Query("allow_api_call = data.apigw.allow"),
+		rego.Query("allow_api_call = data.apigw.decision"),
 		rego.Store(store),
 		rego.Compiler(compiler),
 	)
@@ -85,7 +84,8 @@ func checkOpaPolicy(input OpaInput) (result bool) {
 		panic(err)
 	}
 	log.Printf("Result: [%+v]", rs[0].Bindings["allow_api_call"])
-	result = util.Compare(rs[0].Bindings["allow_api_call"], true) == 0
+	resultMap := rs[0].Bindings["allow_api_call"].(map[string]interface{})
+	result = util.Compare(resultMap["allow"].(bool), true) == 0
 	return result
 }
 
