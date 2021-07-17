@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-
 	"log"
+	"sync"
+
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/google/uuid"
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/open-policy-agent/opa/storage"
@@ -21,10 +23,15 @@ var (
 	//go:embed opa_apigw.rego
 	module string
 	//go:embed opa_authz_data.json
-	authzData string
-	store     storage.Store
-	compiler  *ast.Compiler
+	authzData  string
+	store      storage.Store
+	compiler   *ast.Compiler
+	validUntil time.Time
+	mutex      *sync.Mutex
+	logger     *log.Logger
 )
+
+const authDataValidMin = 1
 
 func main() {
 	lambda.Start(Handler)
@@ -32,7 +39,7 @@ func main() {
 
 func track(start time.Time, name string) {
 	elapsed := time.Since(start)
-	log.Printf("%s took %s", name, elapsed)
+	logger.Printf("%s took %s", name, elapsed)
 }
 
 // Compile OPA policies once per container
@@ -51,6 +58,9 @@ func init() {
 	if compiler.Failed() {
 		panic(compiler.Errors)
 	}
+	validUntil = time.Now().Local().Add(time.Minute * authDataValidMin)
+	mutex = &sync.Mutex{}
+	logger = log.New(log.Default().Writer(), "Lambda # "+uuid.NewString()+"  -- ", log.Flags())
 }
 
 type OpaInput struct {
@@ -59,24 +69,41 @@ type OpaInput struct {
 	Resource  string `json:"resource,omitempty"`
 }
 
-func checkOpaPolicy(input OpaInput) (result bool) {
-	defer track(time.Now(), "checkOpaPolicy()")
-	ctx := context.Background()
+func getRegoQuery(ctx context.Context) (rego.PreparedEvalQuery, error) {
+	defer track(time.Now(), "getRegoQuery()")
+	if time.Now().Local().After(validUntil) {
+		logger.Printf("Invalid Authz Data [%v]", validUntil)
+		mutex.Lock()
+		if time.Now().Local().After(validUntil) { // Still not valid after ?
+			logger.Printf("Invalid Authz Data [%v] after aquiring lock", validUntil)
+			// Store Invalid reload it
+			store = inmem.NewFromReader(bytes.NewBufferString(authzData))
+			validUntil = time.Now().Add(time.Minute * authDataValidMin)
+			logger.Println("New Authz Data Loaded")
+		}
+		mutex.Unlock()
+	}
 	reg := rego.New(
 		rego.Query("allow_api_call = data.apigw.decision"),
 		rego.Store(store),
 		rego.Compiler(compiler),
 		rego.Dump(log.Default().Writer()),
 	)
-	query, err := reg.PrepareForEval(ctx)
+	return reg.PrepareForEval(ctx)
+}
+
+func checkOpaPolicy(input OpaInput) (result bool) {
+	defer track(time.Now(), "checkOpaPolicy()")
+	ctx := context.Background()
+	query, err := getRegoQuery(ctx)
 	if err != nil {
-		log.Printf("Error [%+v]", err)
+		logger.Printf("Error [%+v]", err)
 		return false
 	}
 	// Execute the prepared query.
-	rs, err := query.Eval(context.Background(), rego.EvalInput(input))
+	rs, err := query.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
-		log.Printf("Error [%+v]", err)
+		logger.Printf("Error [%+v]", err)
 		return false
 	}
 	resultMap := rs[0].Bindings["allow_api_call"].(map[string]interface{})
@@ -93,10 +120,10 @@ var sampleToken = "eyJraWQiOiJTeFB0NVdnVWtPXC9lYlNVTklxNDM0T2pzRXJTeENIWlFaVVVhe
 func Handler(event events.APIGatewayV2HTTPRequest) (HttpAPIV2Response, error) {
 	defer track(time.Now(), "Handler()")
 	if checkOpaPolicy(OpaInput{Token: sampleToken, Operation: event.RequestContext.HTTP.Method, Resource: event.RequestContext.HTTP.Path}) {
-		log.Println("OPA policy check ok - request allowed")
+		logger.Println("OPA policy check ok - request allowed")
 		return HttpAPIV2Response{IsAuthorized: true}, nil
 	} else {
-		log.Println("failed OPA policy check")
+		logger.Println("failed OPA policy check")
 		return HttpAPIV2Response{IsAuthorized: false}, nil
 	}
 
