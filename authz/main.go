@@ -17,22 +17,16 @@ import (
 	"github.com/open-policy-agent/opa/util"
 )
 
-//go:embed opa_apigw.rego
-var module string
-
-//go:embed opa_authz_data.json
-var authzData string
-
-var store storage.Store
-var compiler *ast.Compiler
-var ctx context.Context
+var (
+	//go:embed opa_apigw.rego
+	module string
+	//go:embed opa_authz_data.json
+	authzData string
+	store     storage.Store
+	compiler  *ast.Compiler
+)
 
 func main() {
-	log.Println("cold start")
-
-	// just compile OPA policies once per container
-	compileOpaPolicy()
-
 	lambda.Start(Handler)
 }
 
@@ -41,9 +35,9 @@ func track(start time.Time, name string) {
 	log.Printf("%s took %s", name, elapsed)
 }
 
-func compileOpaPolicy() {
-	defer track(time.Now(), "compileOpaPolicy()")
-	ctx = context.Background()
+// Compile OPA policies once per container
+func init() {
+	defer track(time.Now(), "init()")
 	// TODO: Data store. Should pull this from s3.
 	store = inmem.NewFromReader(bytes.NewBufferString(authzData))
 	parsed, err := ast.ParseModule("opa_apigw.rego", module)
@@ -54,36 +48,37 @@ func compileOpaPolicy() {
 	compiler.Compile(map[string]*ast.Module{
 		"opa_apigw.rego": parsed,
 	})
-
 	if compiler.Failed() {
 		panic(compiler.Errors)
 	}
 }
 
 type OpaInput struct {
-	Token     string
-	Operation string
-	Resource  string
+	Token     string `json:"token,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Resource  string `json:"resource,omitempty"`
 }
 
 func checkOpaPolicy(input OpaInput) (result bool) {
 	defer track(time.Now(), "checkOpaPolicy()")
+	ctx := context.Background()
 	reg := rego.New(
 		rego.Query("allow_api_call = data.apigw.decision"),
 		rego.Store(store),
 		rego.Compiler(compiler),
+		rego.Dump(log.Default().Writer()),
 	)
 	query, err := reg.PrepareForEval(ctx)
 	if err != nil {
-		panic(err)
+		log.Printf("Error [%+v]", err)
+		return false
 	}
-
 	// Execute the prepared query.
-	rs, err := query.Eval(ctx, rego.EvalInput(input))
+	rs, err := query.Eval(context.Background(), rego.EvalInput(input))
 	if err != nil {
-		panic(err)
+		log.Printf("Error [%+v]", err)
+		return false
 	}
-	log.Printf("Result: [%+v]", rs[0].Bindings["allow_api_call"])
 	resultMap := rs[0].Bindings["allow_api_call"].(map[string]interface{})
 	result = util.Compare(resultMap["allow"].(bool), true) == 0
 	return result
