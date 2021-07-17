@@ -11,6 +11,9 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/rego"
@@ -29,6 +32,7 @@ var (
 	validUntil time.Time
 	mutex      *sync.Mutex
 	logger     *log.Logger
+	s3Client   *s3.Client
 )
 
 const authDataValidMin = 1
@@ -45,28 +49,54 @@ func track(start time.Time, name string) {
 // Compile OPA policies once per container
 func init() {
 	defer track(time.Now(), "init()")
-	// TODO: Data store. Should pull this from s3.
-	store = inmem.NewFromReader(bytes.NewBufferString(authzData))
+	logger = log.New(log.Default().Writer(), "Lambda # "+uuid.NewString()+"  -- ", log.Flags())
 	parsed, err := ast.ParseModule("opa_apigw.rego", module)
 	if err != nil {
-		panic(err)
+		logger.Fatal(err)
 	}
 	compiler = ast.NewCompiler()
 	compiler.Compile(map[string]*ast.Module{
 		"opa_apigw.rego": parsed,
 	})
 	if compiler.Failed() {
-		panic(compiler.Errors)
+		logger.Fatal(compiler.Errors)
 	}
 	validUntil = time.Now().Local().Add(time.Minute * authDataValidMin)
 	mutex = &sync.Mutex{}
-	logger = log.New(log.Default().Writer(), "Lambda # "+uuid.NewString()+"  -- ", log.Flags())
+
+	ctx := context.Background()
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	s3Client = s3.NewFromConfig(cfg)
+	authzData = "" // Manually setting it to empty just to sure embeeded content doesnt exists
+	authzData, err := getAuthzDataFromS3(ctx)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	store = inmem.NewFromReader(bytes.NewBufferString(authzData))
 }
 
 type OpaInput struct {
 	Token     string `json:"token,omitempty"`
 	Operation string `json:"operation,omitempty"`
 	Resource  string `json:"resource,omitempty"`
+}
+
+func getAuthzDataFromS3(ctx context.Context) (string, error) {
+	defer track(time.Now(), "getAuthzDataFromS3()")
+	output, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("BUCKET_NAME"),
+		Key:    aws.String("AUTHZ_FILE_NAME"),
+	})
+	if err != nil {
+		return "", err
+	}
+	defer output.Body.Close()
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(output.Body)
+	return buf.String(), nil
 }
 
 func getRegoQuery(ctx context.Context) (rego.PreparedEvalQuery, error) {
@@ -77,6 +107,10 @@ func getRegoQuery(ctx context.Context) (rego.PreparedEvalQuery, error) {
 		if time.Now().Local().After(validUntil) { // Still not valid after ?
 			logger.Printf("Invalid Authz Data [%v] after aquiring lock", validUntil)
 			// Store Invalid reload it
+			authzData, err := getAuthzDataFromS3(ctx)
+			if err != nil {
+				logger.Fatal(err)
+			}
 			store = inmem.NewFromReader(bytes.NewBufferString(authzData))
 			validUntil = time.Now().Add(time.Minute * authDataValidMin)
 			logger.Println("New Authz Data Loaded")
