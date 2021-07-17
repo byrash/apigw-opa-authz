@@ -35,7 +35,7 @@ var (
 	s3Client   *s3.Client
 )
 
-const authDataValidMin = 1
+const authDataValidMin = 5
 
 func main() {
 	lambda.Start(Handler)
