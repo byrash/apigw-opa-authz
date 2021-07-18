@@ -10,6 +10,9 @@ build:
 clean:
 	rm -rf ./bin ./vendor **/go.sum
 
-deploy: clean build
+test:
+	opa test -c -f=json ./authz -v
+
+deploy: clean build test
 	sls deploy --verbose
 
